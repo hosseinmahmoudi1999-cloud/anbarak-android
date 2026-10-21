@@ -1,128 +1,96 @@
-        Row(verticalAlignment = Alignment.CenterVertically) { Text("کالاها", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f)); Button(onClick = onAdd) { Text("کالای جدید +") } }
-        OutlinedTextField(search, { search = it }, label = { Text("جست‌وجوی نام یا کد کالا") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        Spacer(Modifier.height(8.dp))
-        if (lines.isEmpty()) Text("کالایی پیدا نشد. از «کالای جدید» شروع کن.", modifier = Modifier.padding(8.dp))
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 12.dp)) {
-            items(lines, key = { it.productId }) { line ->
-                val p = products.firstOrNull { it.id == line.productId }
-                Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Text(line.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Text("کد: ${line.code.ifBlank { "—" }} • واحد: ${line.unit}")
-                    Text("موجودی این انبار: ${line.quantity} • حداقل: ${line.minimum}")
-                    if (line.quantity <= line.minimum) Text("کم‌موجود", color = MaterialTheme.colorScheme.error)
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        OutlinedButton(onClick = { p?.let(onEdit) }, modifier = Modifier.weight(1f)) { Text("ویرایش") }
-                        Button(onClick = { p?.let { onMove(it,"IN") } }, modifier = Modifier.weight(1f)) { Text("ورود") }
-                        OutlinedButton(onClick = { p?.let { onMove(it,"OUT") } }, modifier = Modifier.weight(1f)) { Text("خروج") }
-                        OutlinedButton(onClick = { p?.let { onMove(it,"TRANSFER") } }, modifier = Modifier.weight(1f)) { Text("انتقال") }
-                    }
-                } }
-            }
+package ir.anbarak.app
+
+import android.content.ContentValues
+import android.content.Context
+import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteOpenHelper
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateIntAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.dp
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+data class Warehouse(val id: Long, val name: String, val note: String)
+data class Product(val id: Long, val code: String, val name: String, val unit: String, val minimum: Int)
+data class StockLine(val productId: Long, val code: String, val name: String, val unit: String, val quantity: Int, val minimum: Int)
+data class Movement(val id: Long, val doc: String, val type: String, val product: String, val amount: Int, val from: String, val to: String, val note: String, val time: Long)
+
+class InventoryDb(context: Context) : SQLiteOpenHelper(context, "anbarak.db", null, 2) {
+    override fun onCreate(db: SQLiteDatabase) {
+        db.execSQL("CREATE TABLE warehouses(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, note TEXT NOT NULL DEFAULT '')")
+        db.execSQL("CREATE TABLE products(id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, unit TEXT NOT NULL DEFAULT 'عدد', min_quantity INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1)")
+        db.execSQL("CREATE TABLE stock(warehouse_id INTEGER NOT NULL, product_id INTEGER NOT NULL, quantity INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(warehouse_id,product_id))")
+        db.execSQL("CREATE TABLE movements(id INTEGER PRIMARY KEY AUTOINCREMENT, document_no TEXT NOT NULL, type TEXT NOT NULL, product_id INTEGER NOT NULL, amount INTEGER NOT NULL, from_warehouse_id INTEGER, to_warehouse_id INTEGER, note TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL)")
+        db.execSQL("INSERT INTO warehouses(name,note) VALUES('انبار اصلی','انبار پیش‌فرض')")
+    }
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            db.execSQL("CREATE TABLE warehouses(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, note TEXT NOT NULL DEFAULT '')")
+            db.execSQL("CREATE TABLE stock(warehouse_id INTEGER NOT NULL, product_id INTEGER NOT NULL, quantity INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(warehouse_id,product_id))")
+            db.execSQL("INSERT INTO warehouses(name,note) VALUES('انبار اصلی','انبار پیش‌فرض')")
+            val wid = db.rawQuery("SELECT id FROM warehouses LIMIT 1", null).use { c -> if (c.moveToFirst()) c.getLong(0) else 1L }
+            db.execSQL("ALTER TABLE products ADD COLUMN code TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE products ADD COLUMN unit TEXT NOT NULL DEFAULT 'عدد'")
+            db.execSQL("ALTER TABLE products ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+            db.execSQL("INSERT INTO stock(warehouse_id,product_id,quantity) SELECT ?,id,quantity FROM products", arrayOf<Any>(wid))
+            db.execSQL("CREATE TABLE movements_new(id INTEGER PRIMARY KEY AUTOINCREMENT, document_no TEXT NOT NULL DEFAULT '', type TEXT NOT NULL, product_id INTEGER NOT NULL, amount INTEGER NOT NULL, from_warehouse_id INTEGER, to_warehouse_id INTEGER, note TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL)")
+            db.execSQL("INSERT INTO movements_new(id,document_no,type,product_id,amount,to_warehouse_id,note,created_at) SELECT id,'قدیمی-'||id,type,product_id,amount,?,'',created_at FROM movements", arrayOf<Any>(wid))
+            db.execSQL("DROP TABLE movements")
+            db.execSQL("ALTER TABLE movements_new RENAME TO movements")
         }
     }
-}
-
-@Composable
-fun MovementsPage(db: InventoryDb, refresh: Int) {
-    val list = remember(refresh) { db.movements() }
-    Column(Modifier.fillMaxSize()) {
-        Text("اسناد گردش کالا", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        Text("آخرین ۳۰۰ سند ثبت‌شده", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(8.dp))
-        if (list.isEmpty()) Text("هنوز سندی ثبت نشده است.")
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 12.dp)) {
-            items(list, key = { it.id }) { m ->
-                val date = SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.getDefault()).format(Date(m.time))
-                Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("${m.doc} • ${when(m.type) { "IN" -> "ورود"; "OUT" -> "خروج"; else -> "انتقال" }}", fontWeight = FontWeight.Bold)
-                    Text("${m.product} — تعداد: ${m.amount}")
-                    if (m.from.isNotBlank()) Text("از: ${m.from}")
-                    if (m.to.isNotBlank()) Text("به: ${m.to}")
-                    if (m.note.isNotBlank()) Text("توضیحات: ${m.note}")
-                    Text(date, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
-                } }
-            }
-        }
+    fun warehouses(): List<Warehouse> = buildList {
+        readableDatabase.rawQuery("SELECT id,name,note FROM warehouses ORDER BY id", null).use { c -> while (c.moveToNext()) add(Warehouse(c.getLong(0), c.getString(1), c.getString(2))) }
     }
-}
-
-@Composable
-fun WarehousesPage(warehouses: List<Warehouse>, activeId: Long, onSelect: (Long) -> Unit, onAdd: () -> Unit) {
-    Column(Modifier.fillMaxSize()) {
-        Row(verticalAlignment = Alignment.CenterVertically) { Text("مدیریت انبارها", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f)); Button(onClick = onAdd) { Text("انبار جدید +") } }
-        Text("برای دیدن موجودی یک انبار را انتخاب کن.")
-        Spacer(Modifier.height(8.dp))
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) { items(warehouses, key = { it.id }) { w ->
-            Card(Modifier.fillMaxWidth()) { Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) { Text(w.name, fontWeight = FontWeight.Bold); if (w.note.isNotBlank()) Text(w.note, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                if (w.id == activeId) Text("فعال", color = MaterialTheme.colorScheme.primary) else OutlinedButton(onClick = { onSelect(w.id) }) { Text("انتخاب") }
-            } }
-        } }
+    fun addWarehouse(name: String, note: String): Boolean {
+        if (name.isBlank()) return false
+        return writableDatabase.insert("warehouses", null, ContentValues().apply { put("name", name.trim()); put("note", note.trim()) }) != -1L
     }
-}
-
-@Composable
-fun Metric(title: String, value: Int, symbol: String, tint: Color, modifier: Modifier = Modifier, accent: Color = Color(0xFF176B67)) {
-    val animatedValue by animateIntAsState(targetValue = value, animationSpec = tween(650), label = "metric-count")
-    Card(modifier, shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
-        Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Box(Modifier.size(40.dp).background(tint, RoundedCornerShape(13.dp)), contentAlignment = Alignment.Center) {
-                Text(symbol, color = accent, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            }
-            Text(title, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
-            Text(animatedValue.toString(), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold, color = Color(0xFF172B35))
-        }
+    fun products(): List<Product> = buildList {
+        readableDatabase.rawQuery("SELECT id,code,name,unit,min_quantity FROM products WHERE active=1 ORDER BY name COLLATE NOCASE", null).use { c -> while (c.moveToNext()) add(Product(c.getLong(0), c.getString(1), c.getString(2), c.getString(3), c.getInt(4))) }
     }
-}
-
-@Composable
-fun ProductDialog(existing: Product?, onDismiss: () -> Unit, onSave: (String,String,String,Int) -> Unit) {
-    var code by remember(existing) { mutableStateOf(existing?.code ?: "") }
-    var name by remember(existing) { mutableStateOf(existing?.name ?: "") }
-    var unit by remember(existing) { mutableStateOf(existing?.unit ?: "عدد") }
-    var min by remember(existing) { mutableStateOf((existing?.minimum ?: 0).toString()) }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text(if (existing == null) "ثبت کالای جدید" else "ویرایش کالا") }, text = {
-        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(code, { code = it }, label = { Text("کد کالا") }, singleLine = true)
-            OutlinedTextField(name, { name = it }, label = { Text("نام کالا *") }, singleLine = true)
-            OutlinedTextField(unit, { unit = it }, label = { Text("واحد (عدد، کیلو، متر...) ") }, singleLine = true)
-            OutlinedTextField(min, { min = it.filter(Char::isDigit) }, label = { Text("حداقل موجودی") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
-        }
-    }, confirmButton = { TextButton(onClick = { onSave(code,name,unit,min.toIntOrNull() ?: 0) }) { Text("ذخیره") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("انصراف") } })
-}
-
-@Composable
-fun WarehouseDialog(onDismiss: () -> Unit, onSave: (String,String) -> Unit) {
-    var name by remember { mutableStateOf("") }; var note by remember { mutableStateOf("") }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("افزودن انبار") }, text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedTextField(name, { name = it }, label = { Text("نام انبار *") }, singleLine = true)
-        OutlinedTextField(note, { note = it }, label = { Text("توضیحات") }, singleLine = true)
-    } }, confirmButton = { TextButton(onClick = { onSave(name,note) }) { Text("ذخیره") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("انصراف") } })
-}
-
-@Composable
-fun MovementDialog(product: Product, warehouses: List<Warehouse>, initialId: Long, initialType: String, onDismiss: () -> Unit, onSave: (String,Int,Long?,Long?,String) -> Unit) {
-    var type by remember { mutableStateOf(initialType) }; var amount by remember { mutableStateOf("1") }; var note by remember { mutableStateOf("") }
-    var from by remember { mutableLongStateOf(initialId) }; var to by remember { mutableLongStateOf(warehouses.firstOrNull { it.id != initialId }?.id ?: initialId) }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("سند کالا: ${product.name}") }, text = {
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                FilterChip(type == "IN", { type = "IN" }, label = { Text("ورود") })
-                FilterChip(type == "OUT", { type = "OUT" }, label = { Text("خروج") })
-                FilterChip(type == "TRANSFER", { type = "TRANSFER" }, label = { Text("انتقال") })
-            }
-            OutlinedTextField(amount, { amount = it.filter(Char::isDigit) }, label = { Text("تعداد") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
-            if (type == "OUT" || type == "TRANSFER") { Text("انبار مبدأ"); WarehousePicker(warehouses, from) { from = it } }
-            if (type == "IN" || type == "TRANSFER") { Text("انبار مقصد"); WarehousePicker(warehouses, to) { to = it } }
-            OutlinedTextField(note, { note = it }, label = { Text("توضیحات سند") })
-        }
-    }, confirmButton = { TextButton(onClick = { onSave(type, amount.toIntOrNull() ?: 0, if (type == "OUT" || type == "TRANSFER") from else null, if (type == "IN" || type == "TRANSFER") to else null, note) }) { Text("ثبت سند") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("انصراف") } })
-}
-
-@Composable
-fun WarehousePicker(warehouses: List<Warehouse>, selectedId: Long, onSelect: (Long) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    Box { OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) { Text(warehouses.firstOrNull { it.id == selectedId }?.name ?: "انتخاب انبار") }
-        DropdownMenu(expanded, { expanded = false }) { warehouses.forEach { w -> DropdownMenuItem(text = { Text(w.name) }, onClick = { onSelect(w.id); expanded = false }) } }
+    fun addProduct(code: String, name: String, unit: String, min: Int): Boolean {
+        if (name.isBlank() || min < 0) return false
+        return writableDatabase.insert("products", null, ContentValues().apply { put("code", code.trim()); put("name", name.trim()); put("unit", unit.trim().ifBlank { "عدد" }); put("min_quantity", min) }) != -1L
     }
-}
+    fun updateProduct(p: Product, code: String, name: String, unit: String, min: Int): Boolean {
+        if (name.isBlank() || min < 0) return false
+        return writableDatabase.update("products", ContentValues().apply { put("code", code.trim()); put("name", name.trim()); put("unit", unit.trim().ifBlank { "عدد" }); put("min_quantity", min) }, "id=?", arrayOf(p.id.toString())) > 0
+    }
+    fun stockFor(wid: Long, search: String = ""): List<StockLine> = buildList {
+        val q = "%${search.trim()}%"
+        readableDatabase.rawQuery("SELECT p.id,p.code,p.name,p.unit,COALESCE(s.quantity,0),p.min_quantity FROM products p LEFT JOIN stock s ON s.product_id=p.id AND s.warehouse_id=? WHERE p.active=1 AND (p.name LIKE ? OR p.code LIKE ?) ORDER BY p.name COLLATE NOCASE", arrayOf(wid.toString(), q, q)).use { c ->
+            while (c.moveToNext()) add(StockLine(c.getLong(0), c.getString(1), c.getString(2), c.getString(3), c.getInt(4), c.getInt(5)))
